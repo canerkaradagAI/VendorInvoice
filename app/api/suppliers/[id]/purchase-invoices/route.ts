@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getPurchaseInvoicesBySupplier, dbAll } from "../../../../lib/database"
+import { getPurchaseInvoicesBySupplier, getPurchaseInvoiceItems } from "../../../../lib/database"
 import { normalizeProductCode } from "../../../../lib/utils"
+import { sql } from "@vercel/postgres"
 
 export async function GET(
   request: NextRequest,
@@ -57,12 +58,14 @@ export async function GET(
     const invoiceIds = invoices.map(inv => inv.id)
     
     // Tek query'de tüm items'ları getir
-    const allItems = await dbAll(
-      `SELECT * FROM purchase_invoice_items 
-       WHERE invoice_id IN (${invoiceIds.map(() => '?').join(',')})
-       ORDER BY invoice_id`,
-      invoiceIds
-    )
+    let allItems: any[] = []
+    if (invoiceIds.length > 0) {
+      // PostgreSQL için IN clause ile query
+      const placeholders = invoiceIds.map((_, i) => `$${i + 1}`).join(',')
+      const query = `SELECT * FROM purchase_invoice_items WHERE invoice_id IN (${placeholders}) ORDER BY invoice_id`
+      const result = await sql.query(query, invoiceIds)
+      allItems = result.rows
+    }
     
     // Items'ları invoice'lara grupla
     let invoicesWithItems = invoices.map(invoice => ({

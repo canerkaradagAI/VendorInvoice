@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server"
-import { dbAll } from "../../lib/database"
+import { sql } from "@vercel/postgres"
 
 export async function GET() {
   try {
-    const companies = await dbAll('SELECT * FROM companies ORDER BY company_name');
+    const result = await sql`SELECT * FROM companies ORDER BY company_name`;
+    const companies = result.rows;
     
     // Frontend'in beklediği formata çevir
     const formattedCompanies = companies.map((company: any) => ({
