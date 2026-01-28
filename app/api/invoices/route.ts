@@ -28,8 +28,8 @@ export async function GET(request: NextRequest) {
 
     // Veritabanından faturaları getir
     const { data: invoices, total } = await getInvoices({
-      search,
-      status,
+      search: search || undefined,
+      status: status || undefined,
       page,
       limit
     })

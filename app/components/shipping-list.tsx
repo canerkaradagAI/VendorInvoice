@@ -950,7 +950,7 @@ export function ShippingList({ filters }: ShippingListProps) {
                                   ))}
                                 </div>
                               ) : (
-                                selectedInvoices[item.id]?.[0]?.invoiceNo || selectedInvoices[item.id]?.invoiceNo || '-'
+                                (Array.isArray(selectedInvoices[item.id]) && selectedInvoices[item.id].length > 0 ? selectedInvoices[item.id][0].invoiceNo : (selectedInvoices[item.id] as any)?.invoiceNo) || '-'
                               )}
                             </td>
                             <td className="px-4 py-3">

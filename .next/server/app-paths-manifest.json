@@ -1,6 +1,14 @@
 {
-  "/page": "app/page.js",
+  "/_not-found/page": "app/_not-found/page.js",
+  "/api/shipping/[id]/items/route": "app/api/shipping/[id]/items/route.js",
+  "/api/shipping/[id]/latest-calculation/route": "app/api/shipping/[id]/latest-calculation/route.js",
+  "/api/invoices/route": "app/api/invoices/route.js",
+  "/api/shipping/route": "app/api/shipping/route.js",
+  "/api/shipping/[id]/mark-calculated/route": "app/api/shipping/[id]/mark-calculated/route.js",
   "/api/companies/route": "app/api/companies/route.js",
   "/api/suppliers/route": "app/api/suppliers/route.js",
-  "/api/shipping/route": "app/api/shipping/route.js"
+  "/api/shipping/[id]/calculate-price/route": "app/api/shipping/[id]/calculate-price/route.js",
+  "/api/suppliers/[id]/purchase-invoices/route": "app/api/suppliers/[id]/purchase-invoices/route.js",
+  "/invoices/page": "app/invoices/page.js",
+  "/page": "app/page.js"
 }

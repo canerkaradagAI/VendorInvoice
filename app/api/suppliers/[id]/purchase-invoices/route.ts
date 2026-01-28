@@ -60,13 +60,10 @@ export async function GET(
     // Tek query'de tüm items'ları getir
     let allItems: any[] = []
     if (invoiceIds.length > 0) {
-      // PostgreSQL için template literal kullan
-      // sql template literal ile IN clause için array kullan
-      const result = await sql`
-        SELECT * FROM purchase_invoice_items 
-        WHERE invoice_id = ANY(${invoiceIds})
-        ORDER BY invoice_id
-      `
+      // PostgreSQL için IN clause - array'i string'e çevirip kullan
+      const placeholders = invoiceIds.map((_, i) => `$${i + 1}`).join(',')
+      const query = `SELECT * FROM purchase_invoice_items WHERE invoice_id IN (${placeholders}) ORDER BY invoice_id`
+      const result = await sql.query(query, invoiceIds)
       allItems = result.rows
     }
     
