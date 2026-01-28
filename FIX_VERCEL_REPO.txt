@@ -1,0 +1,23 @@
+VERCEL REPOSITORY DÜZELTME ADIMLARI
+=====================================
+
+Sorun: Vercel yanlış repository kullanıyor
+- Yanlış: cuzdancepte/vendorinvoice_new
+- Doğru: canerkaradagAI/VendorInvoice
+
+ÇÖZÜM:
+1. Vercel Dashboard'a git
+2. "vendorinvoice_new" projesine tıkla
+3. "Settings" sekmesine git
+4. Sol menüden "Git" seçeneğine tıkla
+5. "Disconnect Git Repository" butonuna tıkla
+6. "Connect Git Repository" butonuna tıkla
+7. "canerkaradagAI/VendorInvoice" repository'sini bul ve seç
+8. "Connect" tıkla
+9. Deploy otomatik başlayacak
+
+ALTERNATIF (Yeni Proje):
+1. Vercel Dashboard → "Add New Project"
+2. "Import Git Repository" bölümünde
+3. URL alanına: https://github.com/canerkaradagAI/VendorInvoice.git
+4. "Continue" → "Deploy"
