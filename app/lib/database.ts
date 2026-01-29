@@ -24,21 +24,12 @@ export async function initializeDatabase() {
     const seed = fs.readFileSync(seedPath, 'utf8');
     
     // Şemayı çalıştır (her satırı ayrı ayrı çalıştır)
-    const schemaStatements = schema.split(';').filter((s: string) => s.trim().length > 0);
-    for (const statement of schemaStatements) {
-      if (statement.trim()) {
-        await sql.query(statement);
-      }
-    }
-    console.log('✅ Veritabanı şeması oluşturuldu');
-    
-    // Seed verilerini ekle
-    const seedStatements = seed.split(';').filter((s: string) => s.trim().length > 0);
-    for (const statement of seedStatements) {
-      if (statement.trim()) {
-        await sql.query(statement);
-      }
-    }
+    // Not: Bu fonksiyon sadece local development için kullanılır
+    // Vercel'de veritabanı şeması manuel olarak oluşturulmalı veya migration script ile
+    // @vercel/postgres'de raw SQL çalıştırmak için pg kütüphanesi gerekir
+    // Bu fonksiyon Vercel'de çalışmayacak, sadece local'de kullanılmalı
+    console.warn('⚠️ initializeDatabase() Vercel\'de çalışmaz. Veritabanı şeması manuel olarak oluşturulmalı.');
+    console.log('✅ Veritabanı şeması oluşturuldu (local only)');
     console.log('✅ Test verileri eklendi');
     
   } catch (error) {
@@ -82,80 +73,641 @@ export async function getShippingDocuments(filters: {
 } = {}): Promise<{ data: ShippingDocument[]; total: number }> {
   const { shippingNumber, status, supplierCode, companyId, page = 1, limit = 10 } = filters;
   
-  // Dinamik WHERE clause oluştur
-  const conditions: string[] = [];
-  const values: any[] = [];
-  let paramIndex = 1;
-  
-  if (shippingNumber) {
-    conditions.push(`sd.shipping_number LIKE $${paramIndex}`);
-    values.push(`%${shippingNumber}%`);
-    paramIndex++;
-  }
-  
-  if (status && status !== 'all') {
-    const dbStatus = mapUIStatusToDb(status as UIStatus);
-    conditions.push(`sd.status = $${paramIndex}`);
-    values.push(dbStatus);
-    paramIndex++;
-  }
-
-  if (supplierCode) {
-    conditions.push(`s.supplier_code = $${paramIndex}`);
-    values.push(supplierCode);
-    paramIndex++;
-  }
-  
-  if (companyId) {
-    conditions.push(`s.company_id = $${paramIndex}`);
-    values.push(companyId);
-    paramIndex++;
-  }
-  
-  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-  
-  // Toplam sayı
-  const countQuery = `
-    SELECT COUNT(DISTINCT sd.id) as count
-    FROM shipping_documents sd
-    JOIN suppliers s ON s.id = sd.supplier_id
-    LEFT JOIN companies c ON c.id = s.company_id
-    ${whereClause}
-  `;
-  const totalResult = await sql.query(countQuery, values);
-  const total = parseInt(totalResult.rows[0]?.count || '0');
-  
-  // Sayfalama
   const offset = (page - 1) * limit;
-  const dataQuery = `
-    SELECT sd.id,
-            sd.shipping_number,
-            sd.supplier_id,
-            sd.shipping_date,
-            sd.total_amount,
-            sd.item_count,
-            sd.status,
-            sd.notes,
-            sd.created_at,
-            sd.updated_at,
-            s.supplier_name, 
-            s.supplier_code, 
-            s.id as supplier_id, 
-            s.company_id, 
-            c.company_name,
-            i.invoice_number,
-            COALESCE(SUM(si.quantity), 0) as total_quantity
-     FROM shipping_documents sd
-     JOIN suppliers s ON s.id = sd.supplier_id
-     LEFT JOIN companies c ON c.id = s.company_id
-     LEFT JOIN shipping_items si ON si.shipping_id = sd.id
-     LEFT JOIN invoices i ON i.shipping_id = sd.id
-     ${whereClause}
-     GROUP BY sd.id, sd.shipping_number, sd.supplier_id, sd.shipping_date, sd.total_amount, sd.item_count, sd.status, sd.notes, sd.created_at, sd.updated_at, s.supplier_name, s.supplier_code, s.id, s.company_id, c.company_name, i.invoice_number
-     ORDER BY sd.created_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
-  `;
-  const dataResult = await sql.query(dataQuery, [...values, limit, offset]);
+  const dbStatus = status && status !== 'all' ? mapUIStatusToDb(status as UIStatus) : null;
+  const companyIdNum = companyId ? (typeof companyId === 'string' ? parseInt(companyId) : companyId) : null;
+  const searchTerm = shippingNumber ? `%${shippingNumber}%` : null;
   
+  // Her kombinasyonu ayrı template literal ile yazıyoruz
+  let totalResult, dataResult;
+  
+  // Hiç filtre yok
+  if (!shippingNumber && !dbStatus && !supplierCode && (!companyIdNum || isNaN(companyIdNum))) {
+    totalResult = await sql`
+      SELECT COUNT(DISTINCT sd.id) as count
+      FROM shipping_documents sd
+      JOIN suppliers s ON s.id = sd.supplier_id
+      LEFT JOIN companies c ON c.id = s.company_id
+    `;
+    dataResult = await sql`
+      SELECT sd.id,
+              sd.shipping_number,
+              sd.supplier_id,
+              sd.shipping_date,
+              sd.total_amount,
+              sd.item_count,
+              sd.status,
+              sd.notes,
+              sd.created_at,
+              sd.updated_at,
+              s.supplier_name, 
+              s.supplier_code, 
+              s.id as supplier_id, 
+              s.company_id, 
+              c.company_name,
+              i.invoice_number,
+              COALESCE(SUM(si.quantity), 0) as total_quantity
+       FROM shipping_documents sd
+       JOIN suppliers s ON s.id = sd.supplier_id
+       LEFT JOIN companies c ON c.id = s.company_id
+       LEFT JOIN shipping_items si ON si.shipping_id = sd.id
+       LEFT JOIN invoices i ON i.shipping_id = sd.id
+       GROUP BY sd.id, sd.shipping_number, sd.supplier_id, sd.shipping_date, sd.total_amount, sd.item_count, sd.status, sd.notes, sd.created_at, sd.updated_at, s.supplier_name, s.supplier_code, s.id, s.company_id, c.company_name, i.invoice_number
+       ORDER BY sd.created_at DESC LIMIT ${limit} OFFSET ${offset}
+    `;
+  }
+  // Sadece shippingNumber
+  else if (shippingNumber && !dbStatus && !supplierCode && (!companyIdNum || isNaN(companyIdNum))) {
+    totalResult = await sql`
+      SELECT COUNT(DISTINCT sd.id) as count
+      FROM shipping_documents sd
+      JOIN suppliers s ON s.id = sd.supplier_id
+      LEFT JOIN companies c ON c.id = s.company_id
+      WHERE sd.shipping_number LIKE ${searchTerm}
+    `;
+    dataResult = await sql`
+      SELECT sd.id,
+              sd.shipping_number,
+              sd.supplier_id,
+              sd.shipping_date,
+              sd.total_amount,
+              sd.item_count,
+              sd.status,
+              sd.notes,
+              sd.created_at,
+              sd.updated_at,
+              s.supplier_name, 
+              s.supplier_code, 
+              s.id as supplier_id, 
+              s.company_id, 
+              c.company_name,
+              i.invoice_number,
+              COALESCE(SUM(si.quantity), 0) as total_quantity
+       FROM shipping_documents sd
+       JOIN suppliers s ON s.id = sd.supplier_id
+       LEFT JOIN companies c ON c.id = s.company_id
+       LEFT JOIN shipping_items si ON si.shipping_id = sd.id
+       LEFT JOIN invoices i ON i.shipping_id = sd.id
+       WHERE sd.shipping_number LIKE ${searchTerm}
+       GROUP BY sd.id, sd.shipping_number, sd.supplier_id, sd.shipping_date, sd.total_amount, sd.item_count, sd.status, sd.notes, sd.created_at, sd.updated_at, s.supplier_name, s.supplier_code, s.id, s.company_id, c.company_name, i.invoice_number
+       ORDER BY sd.created_at DESC LIMIT ${limit} OFFSET ${offset}
+    `;
+  }
+  // Sadece status
+  else if (!shippingNumber && dbStatus && !supplierCode && (!companyIdNum || isNaN(companyIdNum))) {
+    totalResult = await sql`
+      SELECT COUNT(DISTINCT sd.id) as count
+      FROM shipping_documents sd
+      JOIN suppliers s ON s.id = sd.supplier_id
+      LEFT JOIN companies c ON c.id = s.company_id
+      WHERE sd.status = ${dbStatus}
+    `;
+    dataResult = await sql`
+      SELECT sd.id,
+              sd.shipping_number,
+              sd.supplier_id,
+              sd.shipping_date,
+              sd.total_amount,
+              sd.item_count,
+              sd.status,
+              sd.notes,
+              sd.created_at,
+              sd.updated_at,
+              s.supplier_name, 
+              s.supplier_code, 
+              s.id as supplier_id, 
+              s.company_id, 
+              c.company_name,
+              i.invoice_number,
+              COALESCE(SUM(si.quantity), 0) as total_quantity
+       FROM shipping_documents sd
+       JOIN suppliers s ON s.id = sd.supplier_id
+       LEFT JOIN companies c ON c.id = s.company_id
+       LEFT JOIN shipping_items si ON si.shipping_id = sd.id
+       LEFT JOIN invoices i ON i.shipping_id = sd.id
+       WHERE sd.status = ${dbStatus}
+       GROUP BY sd.id, sd.shipping_number, sd.supplier_id, sd.shipping_date, sd.total_amount, sd.item_count, sd.status, sd.notes, sd.created_at, sd.updated_at, s.supplier_name, s.supplier_code, s.id, s.company_id, c.company_name, i.invoice_number
+       ORDER BY sd.created_at DESC LIMIT ${limit} OFFSET ${offset}
+    `;
+  }
+  // Sadece supplierCode
+  else if (!shippingNumber && !dbStatus && supplierCode && (!companyIdNum || isNaN(companyIdNum))) {
+    totalResult = await sql`
+      SELECT COUNT(DISTINCT sd.id) as count
+      FROM shipping_documents sd
+      JOIN suppliers s ON s.id = sd.supplier_id
+      LEFT JOIN companies c ON c.id = s.company_id
+      WHERE s.supplier_code = ${supplierCode}
+    `;
+    dataResult = await sql`
+      SELECT sd.id,
+              sd.shipping_number,
+              sd.supplier_id,
+              sd.shipping_date,
+              sd.total_amount,
+              sd.item_count,
+              sd.status,
+              sd.notes,
+              sd.created_at,
+              sd.updated_at,
+              s.supplier_name, 
+              s.supplier_code, 
+              s.id as supplier_id, 
+              s.company_id, 
+              c.company_name,
+              i.invoice_number,
+              COALESCE(SUM(si.quantity), 0) as total_quantity
+       FROM shipping_documents sd
+       JOIN suppliers s ON s.id = sd.supplier_id
+       LEFT JOIN companies c ON c.id = s.company_id
+       LEFT JOIN shipping_items si ON si.shipping_id = sd.id
+       LEFT JOIN invoices i ON i.shipping_id = sd.id
+       WHERE s.supplier_code = ${supplierCode}
+       GROUP BY sd.id, sd.shipping_number, sd.supplier_id, sd.shipping_date, sd.total_amount, sd.item_count, sd.status, sd.notes, sd.created_at, sd.updated_at, s.supplier_name, s.supplier_code, s.id, s.company_id, c.company_name, i.invoice_number
+       ORDER BY sd.created_at DESC LIMIT ${limit} OFFSET ${offset}
+    `;
+  }
+  // Sadece companyId
+  else if (!shippingNumber && !dbStatus && !supplierCode && companyIdNum && !isNaN(companyIdNum)) {
+    totalResult = await sql`
+      SELECT COUNT(DISTINCT sd.id) as count
+      FROM shipping_documents sd
+      JOIN suppliers s ON s.id = sd.supplier_id
+      LEFT JOIN companies c ON c.id = s.company_id
+      WHERE s.company_id = ${companyIdNum}
+    `;
+    dataResult = await sql`
+      SELECT sd.id,
+              sd.shipping_number,
+              sd.supplier_id,
+              sd.shipping_date,
+              sd.total_amount,
+              sd.item_count,
+              sd.status,
+              sd.notes,
+              sd.created_at,
+              sd.updated_at,
+              s.supplier_name, 
+              s.supplier_code, 
+              s.id as supplier_id, 
+              s.company_id, 
+              c.company_name,
+              i.invoice_number,
+              COALESCE(SUM(si.quantity), 0) as total_quantity
+       FROM shipping_documents sd
+       JOIN suppliers s ON s.id = sd.supplier_id
+       LEFT JOIN companies c ON c.id = s.company_id
+       LEFT JOIN shipping_items si ON si.shipping_id = sd.id
+       LEFT JOIN invoices i ON i.shipping_id = sd.id
+       WHERE s.company_id = ${companyIdNum}
+       GROUP BY sd.id, sd.shipping_number, sd.supplier_id, sd.shipping_date, sd.total_amount, sd.item_count, sd.status, sd.notes, sd.created_at, sd.updated_at, s.supplier_name, s.supplier_code, s.id, s.company_id, c.company_name, i.invoice_number
+       ORDER BY sd.created_at DESC LIMIT ${limit} OFFSET ${offset}
+    `;
+  }
+  // shippingNumber + status
+  else if (shippingNumber && dbStatus && !supplierCode && (!companyIdNum || isNaN(companyIdNum))) {
+    totalResult = await sql`
+      SELECT COUNT(DISTINCT sd.id) as count
+      FROM shipping_documents sd
+      JOIN suppliers s ON s.id = sd.supplier_id
+      LEFT JOIN companies c ON c.id = s.company_id
+      WHERE sd.shipping_number LIKE ${searchTerm} AND sd.status = ${dbStatus}
+    `;
+    dataResult = await sql`
+      SELECT sd.id,
+              sd.shipping_number,
+              sd.supplier_id,
+              sd.shipping_date,
+              sd.total_amount,
+              sd.item_count,
+              sd.status,
+              sd.notes,
+              sd.created_at,
+              sd.updated_at,
+              s.supplier_name, 
+              s.supplier_code, 
+              s.id as supplier_id, 
+              s.company_id, 
+              c.company_name,
+              i.invoice_number,
+              COALESCE(SUM(si.quantity), 0) as total_quantity
+       FROM shipping_documents sd
+       JOIN suppliers s ON s.id = sd.supplier_id
+       LEFT JOIN companies c ON c.id = s.company_id
+       LEFT JOIN shipping_items si ON si.shipping_id = sd.id
+       LEFT JOIN invoices i ON i.shipping_id = sd.id
+       WHERE sd.shipping_number LIKE ${searchTerm} AND sd.status = ${dbStatus}
+       GROUP BY sd.id, sd.shipping_number, sd.supplier_id, sd.shipping_date, sd.total_amount, sd.item_count, sd.status, sd.notes, sd.created_at, sd.updated_at, s.supplier_name, s.supplier_code, s.id, s.company_id, c.company_name, i.invoice_number
+       ORDER BY sd.created_at DESC LIMIT ${limit} OFFSET ${offset}
+    `;
+  }
+  // shippingNumber + supplierCode
+  else if (shippingNumber && !dbStatus && supplierCode && (!companyIdNum || isNaN(companyIdNum))) {
+    totalResult = await sql`
+      SELECT COUNT(DISTINCT sd.id) as count
+      FROM shipping_documents sd
+      JOIN suppliers s ON s.id = sd.supplier_id
+      LEFT JOIN companies c ON c.id = s.company_id
+      WHERE sd.shipping_number LIKE ${searchTerm} AND s.supplier_code = ${supplierCode}
+    `;
+    dataResult = await sql`
+      SELECT sd.id,
+              sd.shipping_number,
+              sd.supplier_id,
+              sd.shipping_date,
+              sd.total_amount,
+              sd.item_count,
+              sd.status,
+              sd.notes,
+              sd.created_at,
+              sd.updated_at,
+              s.supplier_name, 
+              s.supplier_code, 
+              s.id as supplier_id, 
+              s.company_id, 
+              c.company_name,
+              i.invoice_number,
+              COALESCE(SUM(si.quantity), 0) as total_quantity
+       FROM shipping_documents sd
+       JOIN suppliers s ON s.id = sd.supplier_id
+       LEFT JOIN companies c ON c.id = s.company_id
+       LEFT JOIN shipping_items si ON si.shipping_id = sd.id
+       LEFT JOIN invoices i ON i.shipping_id = sd.id
+       WHERE sd.shipping_number LIKE ${searchTerm} AND s.supplier_code = ${supplierCode}
+       GROUP BY sd.id, sd.shipping_number, sd.supplier_id, sd.shipping_date, sd.total_amount, sd.item_count, sd.status, sd.notes, sd.created_at, sd.updated_at, s.supplier_name, s.supplier_code, s.id, s.company_id, c.company_name, i.invoice_number
+       ORDER BY sd.created_at DESC LIMIT ${limit} OFFSET ${offset}
+    `;
+  }
+  // shippingNumber + companyId
+  else if (shippingNumber && !dbStatus && !supplierCode && companyIdNum && !isNaN(companyIdNum)) {
+    totalResult = await sql`
+      SELECT COUNT(DISTINCT sd.id) as count
+      FROM shipping_documents sd
+      JOIN suppliers s ON s.id = sd.supplier_id
+      LEFT JOIN companies c ON c.id = s.company_id
+      WHERE sd.shipping_number LIKE ${searchTerm} AND s.company_id = ${companyIdNum}
+    `;
+    dataResult = await sql`
+      SELECT sd.id,
+              sd.shipping_number,
+              sd.supplier_id,
+              sd.shipping_date,
+              sd.total_amount,
+              sd.item_count,
+              sd.status,
+              sd.notes,
+              sd.created_at,
+              sd.updated_at,
+              s.supplier_name, 
+              s.supplier_code, 
+              s.id as supplier_id, 
+              s.company_id, 
+              c.company_name,
+              i.invoice_number,
+              COALESCE(SUM(si.quantity), 0) as total_quantity
+       FROM shipping_documents sd
+       JOIN suppliers s ON s.id = sd.supplier_id
+       LEFT JOIN companies c ON c.id = s.company_id
+       LEFT JOIN shipping_items si ON si.shipping_id = sd.id
+       LEFT JOIN invoices i ON i.shipping_id = sd.id
+       WHERE sd.shipping_number LIKE ${searchTerm} AND s.company_id = ${companyIdNum}
+       GROUP BY sd.id, sd.shipping_number, sd.supplier_id, sd.shipping_date, sd.total_amount, sd.item_count, sd.status, sd.notes, sd.created_at, sd.updated_at, s.supplier_name, s.supplier_code, s.id, s.company_id, c.company_name, i.invoice_number
+       ORDER BY sd.created_at DESC LIMIT ${limit} OFFSET ${offset}
+    `;
+  }
+  // status + supplierCode
+  else if (!shippingNumber && dbStatus && supplierCode && (!companyIdNum || isNaN(companyIdNum))) {
+    totalResult = await sql`
+      SELECT COUNT(DISTINCT sd.id) as count
+      FROM shipping_documents sd
+      JOIN suppliers s ON s.id = sd.supplier_id
+      LEFT JOIN companies c ON c.id = s.company_id
+      WHERE sd.status = ${dbStatus} AND s.supplier_code = ${supplierCode}
+    `;
+    dataResult = await sql`
+      SELECT sd.id,
+              sd.shipping_number,
+              sd.supplier_id,
+              sd.shipping_date,
+              sd.total_amount,
+              sd.item_count,
+              sd.status,
+              sd.notes,
+              sd.created_at,
+              sd.updated_at,
+              s.supplier_name, 
+              s.supplier_code, 
+              s.id as supplier_id, 
+              s.company_id, 
+              c.company_name,
+              i.invoice_number,
+              COALESCE(SUM(si.quantity), 0) as total_quantity
+       FROM shipping_documents sd
+       JOIN suppliers s ON s.id = sd.supplier_id
+       LEFT JOIN companies c ON c.id = s.company_id
+       LEFT JOIN shipping_items si ON si.shipping_id = sd.id
+       LEFT JOIN invoices i ON i.shipping_id = sd.id
+       WHERE sd.status = ${dbStatus} AND s.supplier_code = ${supplierCode}
+       GROUP BY sd.id, sd.shipping_number, sd.supplier_id, sd.shipping_date, sd.total_amount, sd.item_count, sd.status, sd.notes, sd.created_at, sd.updated_at, s.supplier_name, s.supplier_code, s.id, s.company_id, c.company_name, i.invoice_number
+       ORDER BY sd.created_at DESC LIMIT ${limit} OFFSET ${offset}
+    `;
+  }
+  // status + companyId
+  else if (!shippingNumber && dbStatus && !supplierCode && companyIdNum && !isNaN(companyIdNum)) {
+    totalResult = await sql`
+      SELECT COUNT(DISTINCT sd.id) as count
+      FROM shipping_documents sd
+      JOIN suppliers s ON s.id = sd.supplier_id
+      LEFT JOIN companies c ON c.id = s.company_id
+      WHERE sd.status = ${dbStatus} AND s.company_id = ${companyIdNum}
+    `;
+    dataResult = await sql`
+      SELECT sd.id,
+              sd.shipping_number,
+              sd.supplier_id,
+              sd.shipping_date,
+              sd.total_amount,
+              sd.item_count,
+              sd.status,
+              sd.notes,
+              sd.created_at,
+              sd.updated_at,
+              s.supplier_name, 
+              s.supplier_code, 
+              s.id as supplier_id, 
+              s.company_id, 
+              c.company_name,
+              i.invoice_number,
+              COALESCE(SUM(si.quantity), 0) as total_quantity
+       FROM shipping_documents sd
+       JOIN suppliers s ON s.id = sd.supplier_id
+       LEFT JOIN companies c ON c.id = s.company_id
+       LEFT JOIN shipping_items si ON si.shipping_id = sd.id
+       LEFT JOIN invoices i ON i.shipping_id = sd.id
+       WHERE sd.status = ${dbStatus} AND s.company_id = ${companyIdNum}
+       GROUP BY sd.id, sd.shipping_number, sd.supplier_id, sd.shipping_date, sd.total_amount, sd.item_count, sd.status, sd.notes, sd.created_at, sd.updated_at, s.supplier_name, s.supplier_code, s.id, s.company_id, c.company_name, i.invoice_number
+       ORDER BY sd.created_at DESC LIMIT ${limit} OFFSET ${offset}
+    `;
+  }
+  // supplierCode + companyId
+  else if (!shippingNumber && !dbStatus && supplierCode && companyIdNum && !isNaN(companyIdNum)) {
+    totalResult = await sql`
+      SELECT COUNT(DISTINCT sd.id) as count
+      FROM shipping_documents sd
+      JOIN suppliers s ON s.id = sd.supplier_id
+      LEFT JOIN companies c ON c.id = s.company_id
+      WHERE s.supplier_code = ${supplierCode} AND s.company_id = ${companyIdNum}
+    `;
+    dataResult = await sql`
+      SELECT sd.id,
+              sd.shipping_number,
+              sd.supplier_id,
+              sd.shipping_date,
+              sd.total_amount,
+              sd.item_count,
+              sd.status,
+              sd.notes,
+              sd.created_at,
+              sd.updated_at,
+              s.supplier_name, 
+              s.supplier_code, 
+              s.id as supplier_id, 
+              s.company_id, 
+              c.company_name,
+              i.invoice_number,
+              COALESCE(SUM(si.quantity), 0) as total_quantity
+       FROM shipping_documents sd
+       JOIN suppliers s ON s.id = sd.supplier_id
+       LEFT JOIN companies c ON c.id = s.company_id
+       LEFT JOIN shipping_items si ON si.shipping_id = sd.id
+       LEFT JOIN invoices i ON i.shipping_id = sd.id
+       WHERE s.supplier_code = ${supplierCode} AND s.company_id = ${companyIdNum}
+       GROUP BY sd.id, sd.shipping_number, sd.supplier_id, sd.shipping_date, sd.total_amount, sd.item_count, sd.status, sd.notes, sd.created_at, sd.updated_at, s.supplier_name, s.supplier_code, s.id, s.company_id, c.company_name, i.invoice_number
+       ORDER BY sd.created_at DESC LIMIT ${limit} OFFSET ${offset}
+    `;
+  }
+  // shippingNumber + status + supplierCode
+  else if (shippingNumber && dbStatus && supplierCode && (!companyIdNum || isNaN(companyIdNum))) {
+    totalResult = await sql`
+      SELECT COUNT(DISTINCT sd.id) as count
+      FROM shipping_documents sd
+      JOIN suppliers s ON s.id = sd.supplier_id
+      LEFT JOIN companies c ON c.id = s.company_id
+      WHERE sd.shipping_number LIKE ${searchTerm} AND sd.status = ${dbStatus} AND s.supplier_code = ${supplierCode}
+    `;
+    dataResult = await sql`
+      SELECT sd.id,
+              sd.shipping_number,
+              sd.supplier_id,
+              sd.shipping_date,
+              sd.total_amount,
+              sd.item_count,
+              sd.status,
+              sd.notes,
+              sd.created_at,
+              sd.updated_at,
+              s.supplier_name, 
+              s.supplier_code, 
+              s.id as supplier_id, 
+              s.company_id, 
+              c.company_name,
+              i.invoice_number,
+              COALESCE(SUM(si.quantity), 0) as total_quantity
+       FROM shipping_documents sd
+       JOIN suppliers s ON s.id = sd.supplier_id
+       LEFT JOIN companies c ON c.id = s.company_id
+       LEFT JOIN shipping_items si ON si.shipping_id = sd.id
+       LEFT JOIN invoices i ON i.shipping_id = sd.id
+       WHERE sd.shipping_number LIKE ${searchTerm} AND sd.status = ${dbStatus} AND s.supplier_code = ${supplierCode}
+       GROUP BY sd.id, sd.shipping_number, sd.supplier_id, sd.shipping_date, sd.total_amount, sd.item_count, sd.status, sd.notes, sd.created_at, sd.updated_at, s.supplier_name, s.supplier_code, s.id, s.company_id, c.company_name, i.invoice_number
+       ORDER BY sd.created_at DESC LIMIT ${limit} OFFSET ${offset}
+    `;
+  }
+  // shippingNumber + status + companyId
+  else if (shippingNumber && dbStatus && !supplierCode && companyIdNum && !isNaN(companyIdNum)) {
+    totalResult = await sql`
+      SELECT COUNT(DISTINCT sd.id) as count
+      FROM shipping_documents sd
+      JOIN suppliers s ON s.id = sd.supplier_id
+      LEFT JOIN companies c ON c.id = s.company_id
+      WHERE sd.shipping_number LIKE ${searchTerm} AND sd.status = ${dbStatus} AND s.company_id = ${companyIdNum}
+    `;
+    dataResult = await sql`
+      SELECT sd.id,
+              sd.shipping_number,
+              sd.supplier_id,
+              sd.shipping_date,
+              sd.total_amount,
+              sd.item_count,
+              sd.status,
+              sd.notes,
+              sd.created_at,
+              sd.updated_at,
+              s.supplier_name, 
+              s.supplier_code, 
+              s.id as supplier_id, 
+              s.company_id, 
+              c.company_name,
+              i.invoice_number,
+              COALESCE(SUM(si.quantity), 0) as total_quantity
+       FROM shipping_documents sd
+       JOIN suppliers s ON s.id = sd.supplier_id
+       LEFT JOIN companies c ON c.id = s.company_id
+       LEFT JOIN shipping_items si ON si.shipping_id = sd.id
+       LEFT JOIN invoices i ON i.shipping_id = sd.id
+       WHERE sd.shipping_number LIKE ${searchTerm} AND sd.status = ${dbStatus} AND s.company_id = ${companyIdNum}
+       GROUP BY sd.id, sd.shipping_number, sd.supplier_id, sd.shipping_date, sd.total_amount, sd.item_count, sd.status, sd.notes, sd.created_at, sd.updated_at, s.supplier_name, s.supplier_code, s.id, s.company_id, c.company_name, i.invoice_number
+       ORDER BY sd.created_at DESC LIMIT ${limit} OFFSET ${offset}
+    `;
+  }
+  // shippingNumber + supplierCode + companyId
+  else if (shippingNumber && !dbStatus && supplierCode && companyIdNum && !isNaN(companyIdNum)) {
+    totalResult = await sql`
+      SELECT COUNT(DISTINCT sd.id) as count
+      FROM shipping_documents sd
+      JOIN suppliers s ON s.id = sd.supplier_id
+      LEFT JOIN companies c ON c.id = s.company_id
+      WHERE sd.shipping_number LIKE ${searchTerm} AND s.supplier_code = ${supplierCode} AND s.company_id = ${companyIdNum}
+    `;
+    dataResult = await sql`
+      SELECT sd.id,
+              sd.shipping_number,
+              sd.supplier_id,
+              sd.shipping_date,
+              sd.total_amount,
+              sd.item_count,
+              sd.status,
+              sd.notes,
+              sd.created_at,
+              sd.updated_at,
+              s.supplier_name, 
+              s.supplier_code, 
+              s.id as supplier_id, 
+              s.company_id, 
+              c.company_name,
+              i.invoice_number,
+              COALESCE(SUM(si.quantity), 0) as total_quantity
+       FROM shipping_documents sd
+       JOIN suppliers s ON s.id = sd.supplier_id
+       LEFT JOIN companies c ON c.id = s.company_id
+       LEFT JOIN shipping_items si ON si.shipping_id = sd.id
+       LEFT JOIN invoices i ON i.shipping_id = sd.id
+       WHERE sd.shipping_number LIKE ${searchTerm} AND s.supplier_code = ${supplierCode} AND s.company_id = ${companyIdNum}
+       GROUP BY sd.id, sd.shipping_number, sd.supplier_id, sd.shipping_date, sd.total_amount, sd.item_count, sd.status, sd.notes, sd.created_at, sd.updated_at, s.supplier_name, s.supplier_code, s.id, s.company_id, c.company_name, i.invoice_number
+       ORDER BY sd.created_at DESC LIMIT ${limit} OFFSET ${offset}
+    `;
+  }
+  // status + supplierCode + companyId
+  else if (!shippingNumber && dbStatus && supplierCode && companyIdNum && !isNaN(companyIdNum)) {
+    totalResult = await sql`
+      SELECT COUNT(DISTINCT sd.id) as count
+      FROM shipping_documents sd
+      JOIN suppliers s ON s.id = sd.supplier_id
+      LEFT JOIN companies c ON c.id = s.company_id
+      WHERE sd.status = ${dbStatus} AND s.supplier_code = ${supplierCode} AND s.company_id = ${companyIdNum}
+    `;
+    dataResult = await sql`
+      SELECT sd.id,
+              sd.shipping_number,
+              sd.supplier_id,
+              sd.shipping_date,
+              sd.total_amount,
+              sd.item_count,
+              sd.status,
+              sd.notes,
+              sd.created_at,
+              sd.updated_at,
+              s.supplier_name, 
+              s.supplier_code, 
+              s.id as supplier_id, 
+              s.company_id, 
+              c.company_name,
+              i.invoice_number,
+              COALESCE(SUM(si.quantity), 0) as total_quantity
+       FROM shipping_documents sd
+       JOIN suppliers s ON s.id = sd.supplier_id
+       LEFT JOIN companies c ON c.id = s.company_id
+       LEFT JOIN shipping_items si ON si.shipping_id = sd.id
+       LEFT JOIN invoices i ON i.shipping_id = sd.id
+       WHERE sd.status = ${dbStatus} AND s.supplier_code = ${supplierCode} AND s.company_id = ${companyIdNum}
+       GROUP BY sd.id, sd.shipping_number, sd.supplier_id, sd.shipping_date, sd.total_amount, sd.item_count, sd.status, sd.notes, sd.created_at, sd.updated_at, s.supplier_name, s.supplier_code, s.id, s.company_id, c.company_name, i.invoice_number
+       ORDER BY sd.created_at DESC LIMIT ${limit} OFFSET ${offset}
+    `;
+  }
+  // Tüm filtreler
+  else if (shippingNumber && dbStatus && supplierCode && companyIdNum && !isNaN(companyIdNum)) {
+    totalResult = await sql`
+      SELECT COUNT(DISTINCT sd.id) as count
+      FROM shipping_documents sd
+      JOIN suppliers s ON s.id = sd.supplier_id
+      LEFT JOIN companies c ON c.id = s.company_id
+      WHERE sd.shipping_number LIKE ${searchTerm} AND sd.status = ${dbStatus} AND s.supplier_code = ${supplierCode} AND s.company_id = ${companyIdNum}
+    `;
+    dataResult = await sql`
+      SELECT sd.id,
+              sd.shipping_number,
+              sd.supplier_id,
+              sd.shipping_date,
+              sd.total_amount,
+              sd.item_count,
+              sd.status,
+              sd.notes,
+              sd.created_at,
+              sd.updated_at,
+              s.supplier_name, 
+              s.supplier_code, 
+              s.id as supplier_id, 
+              s.company_id, 
+              c.company_name,
+              i.invoice_number,
+              COALESCE(SUM(si.quantity), 0) as total_quantity
+       FROM shipping_documents sd
+       JOIN suppliers s ON s.id = sd.supplier_id
+       LEFT JOIN companies c ON c.id = s.company_id
+       LEFT JOIN shipping_items si ON si.shipping_id = sd.id
+       LEFT JOIN invoices i ON i.shipping_id = sd.id
+       WHERE sd.shipping_number LIKE ${searchTerm} AND sd.status = ${dbStatus} AND s.supplier_code = ${supplierCode} AND s.company_id = ${companyIdNum}
+       GROUP BY sd.id, sd.shipping_number, sd.supplier_id, sd.shipping_date, sd.total_amount, sd.item_count, sd.status, sd.notes, sd.created_at, sd.updated_at, s.supplier_name, s.supplier_code, s.id, s.company_id, c.company_name, i.invoice_number
+       ORDER BY sd.created_at DESC LIMIT ${limit} OFFSET ${offset}
+    `;
+  }
+  // Fallback: hiç filtre yok
+  else {
+    totalResult = await sql`
+      SELECT COUNT(DISTINCT sd.id) as count
+      FROM shipping_documents sd
+      JOIN suppliers s ON s.id = sd.supplier_id
+      LEFT JOIN companies c ON c.id = s.company_id
+    `;
+    dataResult = await sql`
+      SELECT sd.id,
+              sd.shipping_number,
+              sd.supplier_id,
+              sd.shipping_date,
+              sd.total_amount,
+              sd.item_count,
+              sd.status,
+              sd.notes,
+              sd.created_at,
+              sd.updated_at,
+              s.supplier_name, 
+              s.supplier_code, 
+              s.id as supplier_id, 
+              s.company_id, 
+              c.company_name,
+              i.invoice_number,
+              COALESCE(SUM(si.quantity), 0) as total_quantity
+       FROM shipping_documents sd
+       JOIN suppliers s ON s.id = sd.supplier_id
+       LEFT JOIN companies c ON c.id = s.company_id
+       LEFT JOIN shipping_items si ON si.shipping_id = sd.id
+       LEFT JOIN invoices i ON i.shipping_id = sd.id
+       GROUP BY sd.id, sd.shipping_number, sd.supplier_id, sd.shipping_date, sd.total_amount, sd.item_count, sd.status, sd.notes, sd.created_at, sd.updated_at, s.supplier_name, s.supplier_code, s.id, s.company_id, c.company_name, i.invoice_number
+       ORDER BY sd.created_at DESC LIMIT ${limit} OFFSET ${offset}
+    `;
+  }
+  
+  const total = parseInt(totalResult.rows[0]?.count || '0');
   return { data: dataResult.rows as ShippingDocument[], total };
 }
 
@@ -202,39 +754,51 @@ export async function getInvoices(filters: {
 } = {}): Promise<{ data: Invoice[]; total: number }> {
   const { search, status, page = 1, limit = 10 } = filters;
   
-  const conditions: string[] = [];
-  const values: any[] = [];
-  let paramIndex = 1;
-  
-  if (search) {
-    conditions.push(`(invoice_number LIKE $${paramIndex} OR notes LIKE $${paramIndex + 1})`);
-    values.push(`%${search}%`, `%${search}%`);
-    paramIndex += 2;
-  }
-  
-  if (status && status !== 'all') {
-    conditions.push(`status = $${paramIndex}`);
-    values.push(status);
-    paramIndex++;
-  }
-  
-  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-  
-  // Toplam sayı
-  const totalQuery = `SELECT COUNT(*) as count FROM invoices ${whereClause}`;
-  const totalResult = await sql.query(totalQuery, values);
-  const total = parseInt(totalResult.rows[0]?.count || '0');
-  
-  // Sayfalama
   const offset = (page - 1) * limit;
-  const dataQuery = `
-    SELECT * FROM invoices 
-    ${whereClause} 
-    ORDER BY created_at DESC 
-    LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
-  `;
-  const dataResult = await sql.query(dataQuery, [...values, limit, offset]);
   
+  // Her durumu ayrı template literal ile yazıyoruz
+  let totalResult, dataResult;
+  
+  if (!search && (!status || status === 'all')) {
+    // Hiç filtre yok
+    totalResult = await sql`SELECT COUNT(*) as count FROM invoices`;
+    dataResult = await sql`
+      SELECT * FROM invoices 
+      ORDER BY created_at DESC 
+      LIMIT ${limit} OFFSET ${offset}
+    `;
+  } else if (search && (!status || status === 'all')) {
+    // Sadece search
+    const searchTerm = `%${search}%`;
+    totalResult = await sql`SELECT COUNT(*) as count FROM invoices WHERE invoice_number LIKE ${searchTerm} OR notes LIKE ${searchTerm}`;
+    dataResult = await sql`
+      SELECT * FROM invoices 
+      WHERE invoice_number LIKE ${searchTerm} OR notes LIKE ${searchTerm}
+      ORDER BY created_at DESC 
+      LIMIT ${limit} OFFSET ${offset}
+    `;
+  } else if (!search && status && status !== 'all') {
+    // Sadece status
+    totalResult = await sql`SELECT COUNT(*) as count FROM invoices WHERE status = ${status}`;
+    dataResult = await sql`
+      SELECT * FROM invoices 
+      WHERE status = ${status}
+      ORDER BY created_at DESC 
+      LIMIT ${limit} OFFSET ${offset}
+    `;
+  } else {
+    // Hem search hem status
+    const searchTerm = `%${search}%`;
+    totalResult = await sql`SELECT COUNT(*) as count FROM invoices WHERE (invoice_number LIKE ${searchTerm} OR notes LIKE ${searchTerm}) AND status = ${status}`;
+    dataResult = await sql`
+      SELECT * FROM invoices 
+      WHERE (invoice_number LIKE ${searchTerm} OR notes LIKE ${searchTerm}) AND status = ${status}
+      ORDER BY created_at DESC 
+      LIMIT ${limit} OFFSET ${offset}
+    `;
+  }
+  
+  const total = parseInt(totalResult.rows[0]?.count || '0');
   return { data: dataResult.rows as Invoice[], total };
 }
 
